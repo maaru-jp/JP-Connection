@@ -1,95 +1,28 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="zh-Hant">
-<head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <base href="./" />
-  <title>開團進度追蹤</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com" />
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@300;400;500;700&family=Outfit:wght@300;500;600&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="css/styles.css" />
-</head>
-<body>
-  <div class="theme-bg" aria-hidden="true"></div>
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Maaru shop</title>
 
-  <header class="header">
-    <div class="theme-switcher" role="group" aria-label="切換背景主題">
-      <button type="button" class="theme-btn active" data-theme="dawn" aria-pressed="true">天空藍</button>
-      <button type="button" class="theme-btn" data-theme="night" aria-pressed="false">星空</button>
-      <button type="button" class="theme-btn" data-theme="sakura" aria-pressed="false">櫻花</button>
-    </div>
-  </header>
+    <!-- Tailwind CSS (CDN) -->
+    <script src="https://cdn.tailwindcss.com"></script>
 
-  <main class="main">
-    <div class="hero">
-      <a href="#" class="logo-link" title="點擊重新整理" aria-label="重新整理畫面" onclick="location.reload(); return false;">
-        <div class="logo-glass">
-          <div class="logo-shine" aria-hidden="true"></div>
-          <img src="https://res.cloudinary.com/dtll13zax/image/upload/v1772375369/%E5%93%81%E7%89%8Clogo_eheujn.jpg" alt="品牌 Logo" class="logo-img" />
-        </div>
-      </a>
-    </div>
+    <!-- Site CSS (keep custom CSS separate) -->
+    <link rel="stylesheet" href="./assets/style.css" />
+  </head>
+  <body class="min-h-screen text-slate-900">
+    <div id="root"></div>
 
-    <nav class="tabs" role="tablist">
-      <button type="button" class="tab active" role="tab" aria-selected="true" data-filter="upcoming">即將開團</button>
-      <button type="button" class="tab" role="tab" aria-selected="false" data-filter="ongoing">正在開團</button>
-      <button type="button" class="tab" role="tab" aria-selected="false" data-filter="ended">已結團</button>
-    </nav>
+    <!-- React / ReactDOM (CDN, pin versions for stability) -->
+    <!-- NOTE: Do NOT set crossorigin here; it can trigger CORS mode and break some CDNs/redirects. -->
+    <script src="https://unpkg.com/react@18.3.1/umd/react.production.min.js"></script>
+    <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js"></script>
 
-    <section class="cards-section" role="tabpanel">
-      <div class="cards-grid" id="cardsGrid">
-        <!-- 商品卡由 JS 動態插入 -->
-      </div>
-      <p class="empty-state" id="emptyState" hidden>此分類暫無商品</p>
-      <nav class="pagination-wrap" id="paginationWrap" aria-label="分頁"></nav>
-    </section>
-  </main>
+    <!-- Babel: allow JSX in external file (no build step) -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
 
-  <script src="js/app.js"></script>
-  <script>
-    (function () {
-      function fmt(d) {
-        if (!d) return '—';
-        var t = new Date(d + 'T00:00:00').getTime();
-        if (isNaN(t)) return d;
-        var y = new Date(t).getFullYear(), m = ('0' + (new Date(t).getMonth() + 1)).slice(-2), day = ('0' + new Date(t).getDate()).slice(-2);
-        return y + '/' + m + '/' + day;
-      }
-      function esc(s) { var d = document.createElement('div'); d.textContent = s == null ? '' : s; return d.innerHTML; }
-      var def = [
-        { title: '日本直送草莓禮盒', status: 'upcoming', badge: 'new', imageUrl: 'https://images.unsplash.com/photo-1464965911861-746a04b4bca6?w=400', startDate: '2025-03-10', endDate: '2025-03-20', progress: [{ name: '收單中', done: false }, { name: '等待出荷', done: false }, { name: '集運中', done: false }, { name: '抵台', done: false }, { name: '已完成出貨', done: false }] },
-        { title: '韓國美妝熱銷組', status: 'ongoing', badge: 'hot', imageUrl: 'https://images.unsplash.com/photo-1596462502278-27bfdc403348?w=400', startDate: '2025-02-28', endDate: '2025-03-15', registeredCount: 10, progress: [{ name: '收單中', done: true }, { name: '等待出荷', done: true }, { name: '集運中', done: false }, { name: '抵台', done: false }, { name: '已完成出貨', done: false }] },
-        { title: '春日零食大賞', status: 'ongoing', badge: 'recommend', imageUrl: 'https://images.unsplash.com/photo-1606890737304-57a1ca8a5b62?w=400', startDate: '2025-03-01', endDate: '2025-03-12', registeredCount: 24, progress: [{ name: '收單中', done: true }, { name: '等待出荷', done: false }, { name: '集運中', done: false }, { name: '抵台', done: false }, { name: '已完成出貨', done: false }] },
-        { title: '冬季保暖小物團', status: 'ended', badge: 'hot', imageUrl: 'https://images.unsplash.com/photo-1551488831-00ddcb6c6bd3?w=400', startDate: '2025-01-05', endDate: '2025-01-20', progress: [{ name: '收單中', done: true }, { name: '等待出荷', done: true }, { name: '集運中', done: true }, { name: '抵台', done: true }, { name: '已完成出貨', done: true }] },
-        { title: '初春限定和菓子', status: 'upcoming', badge: 'recommend', imageUrl: 'https://images.unsplash.com/photo-1563805042-7684c019e1cb?w=400', startDate: '2025-03-15', endDate: '2025-03-25', progress: [{ name: '收單中', done: false }, { name: '等待出荷', done: false }, { name: '集運中', done: false }, { name: '抵台', done: false }, { name: '已完成出貨', done: false }] }
-      ];
-      setTimeout(function () {
-        var grid = document.getElementById('cardsGrid');
-        var empty = document.getElementById('emptyState');
-        if (!grid || !empty || grid.children.length > 0) return;
-        var filter = 'upcoming';
-        var list = def.filter(function (p) { return p.status === filter; });
-        if (list.length === 0) list = def.slice(0, 2);
-        var icons = { '收單中': '🛒', '等待出荷': '📦', '集運中': '🚚', '抵台': '📍', '已完成出貨': '✓' };
-        list.forEach(function (p) {
-          var badgeTxt = p.badge === 'new' ? '新品' : p.badge === 'hot' ? '熱銷' : '推薦';
-          var badgeCls = p.badge === 'new' ? 'new' : p.badge === 'hot' ? 'hot' : 'recommend';
-          var imgHtml = p.imageUrl ? '<div class="card-image-wrap"><img src="' + esc(p.imageUrl) + '" alt="" class="card-image" loading="lazy" /></div>' : '';
-          var regHtml = (p.registeredCount > 0) ? '<div class="card-registered">共 ' + p.registeredCount + ' 位登記預購</div>' : '';
-          var prog = (p.progress || []).map(function (n, i) {
-            var c = n.done ? 'passed' : (i === (p.progress.findIndex(function (x) { return !x.done; }) || 0)) ? 'current' : 'pending';
-            return '<div class="progress-node ' + c + '"><span class="progress-node-label">' + esc(n.name) + '</span><span class="progress-node-icon">' + (icons[n.name] || '') + '</span></div>';
-          }).join('');
-          var card = document.createElement('article');
-          card.className = 'product-card';
-          card.innerHTML = '<span class="card-badge ' + badgeCls + '">' + badgeTxt + '</span>' + imgHtml + '<h3 class="card-title">' + esc(p.title) + '</h3><div class="card-dates"><span>開團 ' + fmt(p.startDate) + '</span><span>結團 ' + fmt(p.endDate) + '</span></div>' + regHtml + '<div class="progress-wrap"><div class="progress-label">進度</div><div class="progress-steps">' + prog + '</div></div>';
-          grid.appendChild(card);
-        });
-        empty.hidden = true;
-      }, 800);
-    })();
-  </script>
-</body>
+    <!-- App JS (kept separate from HTML) -->
+    <script type="text/babel" data-presets="env,react" src="./assets/app.jsx"></script>
+  </body>
 </html>
-
