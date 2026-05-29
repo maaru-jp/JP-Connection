@@ -40,15 +40,19 @@ function Link({ to, className, children }) {
 }
 
 function getRoute(path) {
+  // path may include query: "/?category=xxx"
+  const [pathname, searchPart] = path.includes("?") ? path.split("?", 2) : [path, ""];
+  const search = searchPart ? "?" + searchPart : "";
+
   // routes:
   // - "/" => home
   // - "/product/:name" => detail (name is URI encoded)
-  if (path === "/" || path === "") return { name: "home" };
-  if (path.startsWith("/product/")) {
-    const encodedName = path.slice("/product/".length);
-    return { name: "product", encodedName };
+  if (pathname === "/" || pathname === "") return { name: "home", search };
+  if (pathname.startsWith("/product/")) {
+    const encodedName = pathname.slice("/product/".length);
+    return { name: "product", encodedName, search };
   }
-  return { name: "notfound" };
+  return { name: "notfound", search };
 }
 
 function toNumberOrNull(v) {
@@ -80,6 +84,92 @@ function isWithinLastDays(dateValue, days) {
   return ms <= days * 24 * 60 * 60 * 1000;
 }
 
+function parsePreorderStatus(v) {
+  if (!v) return "open";
+  const s = String(v).trim();
+  if (s === "完售" || s === "售完" || s === "sold_out") return "sold_out";
+  if (s === "截止" || s === "已截止" || s === "closed") return "closed";
+  return "open";
+}
+
+function isDeadlinePassed(deadlineAt) {
+  const d = parseDateOrNull(deadlineAt);
+  if (!d) return false;
+  const end = new Date(d);
+  end.setHours(23, 59, 59, 999);
+  return Date.now() > end.getTime();
+}
+
+function isDeadlineClosingSoon(deadlineAt, days) {
+  const d = parseDateOrNull(deadlineAt);
+  if (!d) return false;
+  const end = new Date(d);
+  end.setHours(23, 59, 59, 999);
+  const diff = end.getTime() - Date.now();
+  return diff > 0 && diff <= days * 24 * 60 * 60 * 1000;
+}
+
+function canPreorderOrder(product) {
+  if (!product?.isPreorder) return true;
+  if (product.preorderStatus === "sold_out") return false;
+  if (product.preorderStatus === "closed") return false;
+  if (isDeadlinePassed(product.deadlineAt)) return false;
+  return true;
+}
+
+function formatDeadlineDisplay(deadlineAt) {
+  const d = parseDateOrNull(deadlineAt);
+  if (!d) return null;
+  return d.toLocaleDateString("zh-TW", {
+    year: "numeric",
+    month: "long",
+    day: "numeric",
+  });
+}
+
+function formatPriceRangeTWD(minJpy, maxJpy, rate) {
+  const min = toNumberOrNull(minJpy);
+  const max = toNumberOrNull(maxJpy);
+  const r = toNumberOrNull(rate);
+  if (min == null || r == null) return null;
+  if (max == null || min === max) return formatTWDFromJPY(min, r);
+  const lo = Math.round(min * r);
+  const hi = Math.round(max * r);
+  return "NT$" + lo.toLocaleString("zh-TW") + "~NT$" + hi.toLocaleString("zh-TW");
+}
+
+function getProductGroup(products, name) {
+  return products.filter((p) => p.name === name);
+}
+
+function enrichProductCard(product, allProducts) {
+  const group = getProductGroup(allProducts, product.name);
+  const prices = group.map((p) => p.price).filter((p) => p != null);
+  const minPrice = prices.length ? Math.min(...prices) : product.price;
+  const maxPrice = prices.length ? Math.max(...prices) : product.price;
+  const representative =
+    group.find((p) => p.expectedArrival || p.preorderNote) || group[0] || product;
+  const isPreorder = group.some((p) => p.isPreorder);
+  const canOrder = group.some((p) => canPreorderOrder(p));
+  const allSoldOut = isPreorder && group.length > 0 && !canOrder;
+  const anyClosingSoon = group.some(
+    (p) => p.isPreorder && canPreorderOrder(p) && isDeadlineClosingSoon(p.deadlineAt, 3)
+  );
+
+  return {
+    ...product,
+    isPreorder,
+    minPrice,
+    maxPrice,
+    expectedArrival: representative?.expectedArrival || product.expectedArrival || "",
+    preorderNote: representative?.preorderNote || product.preorderNote || "",
+    deadlineAt: representative?.deadlineAt ?? product.deadlineAt ?? null,
+    allSoldOut,
+    anyClosingSoon,
+    canOrder,
+  };
+}
+
 function formatJPY(n) {
   const num = toNumberOrNull(n);
   if (num == null) return null;
@@ -95,6 +185,9 @@ function formatTWDFromJPY(jpy, rate) {
 
 const API_URL =
   "https://script.googleusercontent.com/macros/echo?user_content_key=AY5xjrTS-qEphaiBZpDtZQiI4E_L4Ge4iew16KNpZjrnxlTW9Un0pCjTYDgyjxahCWPMth1rKbw4LC2adRlvAfht8Yjg7lZHaSNf2S-SriWDDtPkvZ0ZAn44OhpAap08hwkyQnBZgk4So2daHtOKP07hH3WXCLBCTE0KweDPxOqKTj3iuBwAcZ3A6a2yB3lhKShH_c4yHGiNFo8kDU6geRbf5a0XtAG5j6s2v3vrQw-ebi9metYny89Q59EvXqqNicsMMaWcLpxHBU26yHqiKu9XQ0GZLvMhgA&lib=MCN1sfGqsjw8Wsi0FJVsTJbQ42JGSsI5e";
+
+// 在 GitHub Pages 等跨站環境下，Google 試算表 API 常因 CORS 被擋，失敗時改經由此 proxy 重試
+const CORS_PROXY_PREFIX = "https://corsproxy.io/?";
 
 function normalizeItem(row, index) {
   if (!row || typeof row !== "object") return null;
@@ -126,12 +219,28 @@ function normalizeItem(row, index) {
     "";
   const variant = row.variant ?? row.規格 ?? row.顏色 ?? row.option ?? "";
   const category = row.category ?? row.分類 ?? "";
+  const subcategory = row.subcategory ?? row.子分類 ?? "";
   const isHot = toBoolFlag(row.hot ?? row.熱銷);
   const isRecommended = toBoolFlag(row.recommended ?? row.推薦);
   const publishedAt = row.publishedAt ?? row.上架日期 ?? row.上架時間 ?? null;
   const isNewByFlag = toBoolFlag(row.isNew ?? row.新品);
   const isNewByDate = isWithinLastDays(publishedAt, 7);
   const isNew = isNewByFlag || isNewByDate;
+  const productType = row.productType ?? row.商品類型 ?? row.type ?? "";
+  const typeStr = String(productType).trim().toLowerCase();
+  const isPreorder =
+    toBoolFlag(row.preorder ?? row.預購) ||
+    typeStr === "預購" ||
+    typeStr === "preorder";
+  const expectedArrival = String(
+    row.expectedArrival ?? row.預計到貨 ?? row.到貨時間 ?? ""
+  ).trim();
+  const deadlineAt = row.deadlineAt ?? row.截單日期 ?? row.截止日 ?? null;
+  const preorderNote = String(
+    row.preorderNote ?? row.預購備註 ?? row.預購說明 ?? ""
+  ).trim();
+  const rawStatus = row.preorderStatus ?? row.預購狀態 ?? "";
+  const preorderStatus = parsePreorderStatus(rawStatus);
 
   const sku = [name, variant, price ?? ""].join("||");
 
@@ -146,10 +255,16 @@ function normalizeItem(row, index) {
     introduction,
     variant,
     category,
+    subcategory,
     isHot,
     isRecommended,
     isNew,
     publishedAt,
+    isPreorder,
+    expectedArrival,
+    deadlineAt,
+    preorderNote,
+    preorderStatus,
   };
 }
 
@@ -165,36 +280,66 @@ function useProducts() {
     async function fetchData() {
       setLoading(true);
       setError(null);
-      try {
-        // IMPORTANT: do NOT send custom headers here.
-        // Custom headers trigger CORS preflight (OPTIONS), and Google Script often doesn't reply with CORS headers for OPTIONS.
-        const res = await fetch(API_URL, { cache: "no-store" });
-        if (!res.ok) throw new Error("HTTP error " + res.status);
-
-        const data = await res.json();
-        console.log("Raw API data:", data);
-
-        const apiRate = toNumberOrNull(data?.rate);
-        if (!cancelled) setRate(apiRate);
-
-        const rows = Array.isArray(data)
-          ? data
-          : Array.isArray(data?.products)
-          ? data.products
-          : Array.isArray(data?.data)
-          ? data.data
-          : [];
-
-        const normalized = rows
-          .map((row, idx) => normalizeItem(row, idx))
-          .filter((x) => x && x.name);
-
-        if (!cancelled) setProducts(normalized);
-      } catch (err) {
-        console.error("Fetch error:", err);
-        if (!cancelled) setError(err?.message || "無法載入商品資料");
-      } finally {
-        if (!cancelled) setLoading(false);
+      let lastError = null;
+      const urlsToTry = [
+        API_URL,
+        CORS_PROXY_PREFIX + encodeURIComponent(API_URL),
+      ];
+      for (const url of urlsToTry) {
+        if (cancelled) break;
+        try {
+          const res = await fetch(url, { cache: "no-store" });
+          const text = await res.text();
+          if (!res.ok) {
+            throw new Error("HTTP " + res.status);
+          }
+          if (text.trimStart().startsWith("<")) {
+            throw new Error("HTML_RESPONSE");
+          }
+          const data = JSON.parse(text);
+          if (!cancelled) {
+            console.log("Raw API data:", data);
+            const apiRate = toNumberOrNull(data?.rate);
+            setRate(apiRate);
+            const rows = Array.isArray(data)
+              ? data
+              : Array.isArray(data?.products)
+              ? data.products
+              : Array.isArray(data?.data)
+              ? data.data
+              : [];
+            const normalized = rows
+              .map((row, idx) => normalizeItem(row, idx))
+              .filter((x) => x && x.name);
+            setProducts(normalized);
+            if (!cancelled && rows.length > 0 && normalized.length === 0) {
+              console.warn("API 有回傳筆數但無有效商品，請確認試算表第一列為標題且含「商品名稱」欄位，第二列起有商品名稱。", rows);
+            }
+          }
+          lastError = null;
+          break;
+        } catch (err) {
+          lastError = err;
+          console.warn("Fetch attempt failed:", url === API_URL ? "direct" : "via proxy", err);
+        }
+      }
+      if (!cancelled) {
+        if (lastError) {
+          let msg = lastError?.message || "無法載入商品資料";
+          if (msg === "HTML_RESPONSE" || (msg.includes("Unexpected token '<'") && msg.includes("DOCTYPE"))) {
+            msg =
+              "API 回傳了網頁而非資料。請確認：① 網址是否為 Google「部署」→「網頁應用程式」的完整 URL；② 以試算表擁有者身分在瀏覽器開啟該 URL 一次，若有「授權」畫面請按授權，完成後再重新整理商店頁面。";
+          } else {
+            const hint =
+              window.location.hostname.includes("github.io") ||
+              window.location.hostname === "localhost"
+                ? " 若在 GitHub 上仍無法載入，請在 Google Apps Script 的 doGet 回傳時加上 CORS 標頭（見專案說明）。"
+                : "";
+            msg = msg + hint;
+          }
+          setError(msg);
+        }
+        setLoading(false);
       }
     }
 
@@ -220,11 +365,306 @@ function getUniqueProductsByName(products) {
   return result;
 }
 
-function Navbar({ cartCount, onOpenCart }) {
+// 分類選單結構：主分類 + 子分類（可展開/收合）
+const CATEGORY_MENU = [
+  {
+    label: "文 | 具 | 小 | 物",
+    value: "文具小物",
+    children: [
+      { label: "各式筆類", value: "各式筆類" },
+      { label: "筆記本 | 便條紙", value: "筆記本便條紙" },
+      { label: "卡片 | 信紙 | 紙袋", value: "卡片信紙紙袋" },
+      { label: "文件夾 | 資料袋", value: "文件夾資料袋" },
+      { label: "紙膠帶 | 貼紙", value: "紙膠帶貼紙" },
+      { label: "筆袋 | 筆盒", value: "筆袋筆盒" },
+      { label: "剪刀 | 尺 | 事務用品", value: "剪刀尺事務用品" },
+      { label: "3C周邊", value: "3C周邊" },
+    ],
+  },
+  {
+    label: "包 | 袋 | 配 | 件",
+    value: "包袋配件",
+    children: [
+      { label: "後背包", value: "後背包" },
+      { label: "手提 | 斜背包", value: "手提斜背包" },
+      { label: "肩背 | 側背包", value: "肩背側背包" },
+      { label: "皮夾", value: "皮夾" },
+      { label: "零錢包 | 卡夾", value: "零錢包卡夾" },
+      { label: "化妝包 | 束口袋 | 收納包", value: "化妝包束口袋收納包" },
+      { label: "旅行用品", value: "旅行用品" },
+      { label: "環保購物袋", value: "環保購物袋" },
+      { label: "眼鏡盒", value: "眼鏡盒" },
+      { label: "吊飾 | 鑰匙圈", value: "吊飾鑰匙圈" },
+      { label: "手錶 | 飾品", value: "手錶飾品" },
+      { label: "服飾 | 鞋襪 | 帽子 | 圍巾", value: "服飾鞋襪帽子圍巾" },
+      { label: "髮飾", value: "髮飾" },
+      { label: "風扇 | 扇子", value: "風扇扇子" },
+    ],
+  },
+  {
+    label: "餐 | 廚 | 百 | 貨",
+    value: "餐廚百貨",
+    children: [
+      { label: "匙 | 叉 | 筷", value: "匙叉筷" },
+      { label: "碗 | 盤 | 食器類", value: "碗盤食器類" },
+      { label: "便當盒 | 保鮮盒", value: "便當盒保鮮盒" },
+      { label: "馬克杯 | 各式水杯", value: "馬克杯各式水杯" },
+      { label: "保溫杯瓶", value: "保溫杯瓶" },
+      { label: "水壺", value: "水壺" },
+      { label: "吸管 | 杯蓋 | 杯墊", value: "吸管杯蓋杯墊" },
+      { label: "料理烘焙模具 | 創意便當", value: "料理烘焙模具創意便當" },
+      { label: "杯袋 | 便當袋", value: "杯袋便當袋" },
+      { label: "鍋具 | 茶壺 | 廚房電器", value: "鍋具茶壺廚房電器" },
+      { label: "廚具 | 餐廚小物", value: "廚具餐廚小物" },
+      { label: "廚房收納", value: "廚房收納" },
+    ],
+  },
+  {
+    label: "媽 | 咪 | 寶 | 貝",
+    value: "媽咪寶貝",
+    children: [
+      { label: "兒童水壺 | 杯瓶", value: "兒童水壺杯瓶" },
+      { label: "兒童餐具", value: "兒童餐具" },
+      { label: "玩具", value: "玩具" },
+      { label: "絨毛玩偶 | 公仔", value: "絨毛玩偶公仔" },
+      { label: "卡通泡澡球", value: "卡通泡澡球" },
+      { label: "Tomica小汽車", value: "Tomica小汽車" },
+      { label: "兒童包袋服飾配件", value: "兒童包袋服飾配件" },
+      { label: "母嬰用品", value: "母嬰用品" },
+    ],
+  },
+  {
+    label: "居 | 家 | 雜 | 貨",
+    value: "居家雜貨",
+    children: [
+      { label: "桌上小物收納", value: "桌上小物收納" },
+      { label: "收納籃 | 收納箱", value: "收納籃收納箱" },
+      { label: "門簾 | 地墊", value: "門簾地墊" },
+      { label: "寢具 | 抱枕 | 毯", value: "寢具抱枕毯" },
+      { label: "時鐘 | 傢飾 | 燈", value: "時鐘傢飾燈" },
+      { label: "室內拖 | 圍裙", value: "室內拖圍裙" },
+      { label: "掛勾 | 衣架 | 洗曬", value: "掛勾衣架洗曬" },
+      { label: "雨具 | 雨衣", value: "雨具雨衣" },
+      { label: "垃圾桶 | 清潔小物", value: "垃圾桶清潔小物" },
+      { label: "居家雜貨", value: "居家雜貨" },
+      { label: "桌墊 | 野餐墊", value: "桌墊野餐墊" },
+      { label: "汽機車用品", value: "汽機車用品" },
+    ],
+  },
+  {
+    label: "衛 | 浴 | 用 | 品",
+    value: "衛浴用品",
+    children: [
+      { label: "毛巾 | 浴巾", value: "毛巾浴巾" },
+      { label: "手帕 | 擦手巾", value: "手帕擦手巾" },
+      { label: "牙刷 | 盥洗小物", value: "牙刷盥洗小物" },
+      { label: "浴室收納 | 用具", value: "浴室收納用具" },
+    ],
+  },
+  {
+    label: "美 | 妝 | 衛 | 生",
+    value: "美妝衛生",
+    children: [
+      { label: "口罩 | 防疫周邊", value: "口罩防疫周邊" },
+      { label: "分裝瓶罐", value: "分裝瓶罐" },
+      { label: "鏡梳", value: "鏡梳" },
+      { label: "濕紙巾 | 面紙", value: "濕紙巾面紙" },
+      { label: "ok繃 | 棉棒 | 牙線", value: "ok繃棉棒牙線" },
+      { label: "清潔保養", value: "清潔保養" },
+      { label: "美甲小物", value: "美甲小物" },
+      { label: "其他美妝小物", value: "其他美妝小物" },
+    ],
+  },
+];
+
+function CategorySidebar({ open, onClose, searchKeyword, onSearchChange, onNavigate }) {
+  const searchRef = React.useRef(null);
+  const [expandedKeys, setExpandedKeys] = React.useState(() => new Set(CATEGORY_MENU.map((c) => c.value)));
+
+  React.useEffect(() => {
+    if (open && searchRef.current) searchRef.current.focus();
+  }, [open]);
+
+  function toggleExpand(value) {
+    setExpandedKeys((prev) => {
+      const next = new Set(prev);
+      if (next.has(value)) next.delete(value);
+      else next.add(value);
+      return next;
+    });
+  }
+
+  const linkClass =
+    "flex items-center justify-between w-full py-3.5 px-4 text-left text-sm text-slate-300 hover:text-white hover:bg-white/5 transition-colors";
+  const subLinkClass =
+    "flex items-center w-full py-2.5 pl-6 pr-4 text-left text-sm text-slate-400 hover:text-white hover:bg-white/5 transition-colors";
+  const divider = "border-b border-slate-600/60";
+
+  return (
+    <>
+      <div
+        className={[
+          "fixed inset-0 z-30 transition-opacity",
+          open ? "opacity-100 pointer-events-auto" : "opacity-0 pointer-events-none",
+        ].join(" ")}
+        aria-hidden={!open}
+      >
+        <div
+          className="absolute inset-0 bg-black/40"
+          onClick={onClose}
+          aria-label="關閉選單"
+        />
+      </div>
+      <aside
+        className={[
+          "fixed left-0 top-0 z-40 h-full w-[280px] max-w-[85vw] bg-slate-800 shadow-xl",
+          "flex flex-col transition-transform duration-200 ease-out",
+          open ? "translate-x-0" : "-translate-x-full",
+        ].join(" ")}
+        aria-label="商品分類選單"
+      >
+        <div className="p-4 border-b border-slate-600/60 flex items-center justify-between">
+          <span className="text-xs font-semibold text-slate-400 tracking-widest uppercase">
+            分類選單
+          </span>
+          <button
+            type="button"
+            onClick={onClose}
+            className="w-9 h-9 rounded-full border border-slate-500 text-slate-400 hover:text-white hover:border-slate-400 flex items-center justify-center"
+            aria-label="關閉"
+          >
+            ✕
+          </button>
+        </div>
+
+        <div className="flex-1 overflow-auto">
+          <div className="p-3">
+            <div className="relative rounded-lg bg-slate-700/80 border border-slate-600">
+              <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" aria-hidden>
+                🔍
+              </span>
+              <input
+                ref={searchRef}
+                type="text"
+                value={searchKeyword}
+                onChange={(e) => onSearchChange(e.target.value)}
+                placeholder="商品關鍵字"
+                className="w-full bg-transparent pl-9 pr-3 py-2.5 text-sm text-white placeholder:text-slate-500 focus:outline-none rounded-lg"
+              />
+            </div>
+          </div>
+
+          <nav className="py-1">
+            <div className={divider}>
+              <button
+                type="button"
+                onClick={() => { onNavigate("/"); onClose(); }}
+                className={linkClass}
+              >
+                商店首頁
+              </button>
+            </div>
+            <div className={divider}>
+              <button
+                type="button"
+                onClick={() => { onNavigate("/"); onClose(); }}
+                className={linkClass}
+              >
+                卡通角色大賞
+              </button>
+            </div>
+            <div className={divider}>
+              <button
+                type="button"
+                onClick={() => { onNavigate("/?section=preorder"); onClose(); }}
+                className={linkClass}
+              >
+                <span>預購開團中 ✨</span>
+              </button>
+            </div>
+            <div className={divider}>
+              <button
+                type="button"
+                onClick={() => { onNavigate("/"); onClose(); }}
+                className={linkClass}
+              >
+                <span>HOT新品推薦</span>
+              </button>
+            </div>
+            <div className={divider}>
+              <button
+                type="button"
+                onClick={() => { onNavigate("/?section=ideas"); onClose(); }}
+                className={linkClass}
+              >
+                點子選單
+              </button>
+            </div>
+
+            {CATEGORY_MENU.map((item) => (
+              <div key={item.value} className={divider}>
+                <button
+                  type="button"
+                  onClick={() => toggleExpand(item.value)}
+                  className={linkClass}
+                  aria-expanded={expandedKeys.has(item.value)}
+                >
+                  <span>{item.label}</span>
+                  <span
+                    className={[
+                      "text-slate-500 transition-transform",
+                      expandedKeys.has(item.value) ? "rotate-180" : "",
+                    ].join(" ")}
+                    aria-hidden
+                  >
+                    ▼
+                  </span>
+                </button>
+                {item.children && expandedKeys.has(item.value) ? (
+                  <div className="py-0.5">
+                    {item.children.map((sub) => (
+                      <button
+                        key={sub.value}
+                        type="button"
+                        onClick={() => {
+                          onNavigate(
+                            "/?category=" +
+                              encodeURIComponent(item.value) +
+                              "&subcategory=" +
+                              encodeURIComponent(sub.value)
+                          );
+                          onClose();
+                        }}
+                        className={subLinkClass}
+                      >
+                        {sub.label}
+                      </button>
+                    ))}
+                  </div>
+                ) : null}
+              </div>
+            ))}
+          </nav>
+        </div>
+      </aside>
+    </>
+  );
+}
+
+function Navbar({ cartCount, onOpenCart, onOpenMenu }) {
   return (
     <header className="sticky top-0 z-20 bg-white/80 backdrop-blur border-b border-slate-200">
       <div className="max-w-6xl mx-auto px-4 py-4 grid grid-cols-[1fr_auto_1fr] items-center">
-        <div />
+        <div className="flex justify-start">
+          <button
+            type="button"
+            onClick={onOpenMenu}
+            className="inline-flex items-center justify-center w-11 h-11 rounded-full border border-slate-200 bg-white hover:border-slate-900 transition-colors"
+            aria-label="開啟分類選單"
+          >
+            <span className="text-lg leading-none">☰</span>
+          </button>
+        </div>
 
         <Link
           to="/"
@@ -269,21 +709,37 @@ function Navbar({ cartCount, onOpenCart }) {
 }
 
 function ProductCard({ product, rate }) {
-  const twd = formatTWDFromJPY(product.price, rate);
+  const twd =
+    product.minPrice != null && product.maxPrice != null
+      ? formatPriceRangeTWD(product.minPrice, product.maxPrice, rate)
+      : formatTWDFromJPY(product.price, rate);
 
   const encodedName = encodeURIComponent(product.name);
+  const hasBadges =
+    product.isPreorder ||
+    product.allSoldOut ||
+    product.anyClosingSoon ||
+    product.isHot ||
+    product.isRecommended ||
+    product.isNew;
 
   return (
     <Link
       to={`/product/${encodedName}`}
-      className="product-card group block bg-white rounded-2xl overflow-hidden border border-slate-200 hover:border-slate-900 transition-colors duration-200"
+      className={[
+        "product-card group block bg-white rounded-2xl overflow-hidden border border-slate-200 hover:border-slate-900 transition-colors duration-200",
+        product.allSoldOut ? "opacity-70" : "",
+      ].join(" ")}
     >
       <div className="scan-target relative aspect-[4/5] bg-slate-100 overflow-hidden">
         {product.image ? (
           <img
             src={product.image}
             alt={product.name}
-            className="w-full h-full object-contain group-hover:scale-105 transition-transform duration-300"
+            className={[
+              "w-full h-full object-contain transition-transform duration-300",
+              product.allSoldOut ? "grayscale" : "group-hover:scale-105",
+            ].join(" ")}
             loading="lazy"
           />
         ) : (
@@ -292,8 +748,22 @@ function ProductCard({ product, rate }) {
           </div>
         )}
 
-        {product.isHot || product.isRecommended || product.isNew ? (
-          <div className="absolute top-3 left-3 flex flex-wrap gap-1">
+        {hasBadges ? (
+          <div className="absolute top-3 left-3 flex flex-wrap gap-1 max-w-[calc(100%-1.5rem)]">
+            {product.isPreorder ? (
+              <span className="text-[11px] px-2 py-1 rounded-full bg-amber-500 text-white shadow-sm">
+                預購
+              </span>
+            ) : null}
+            {product.allSoldOut ? (
+              <span className="text-[11px] px-2 py-1 rounded-full bg-slate-500 text-white shadow-sm">
+                完售
+              </span>
+            ) : product.anyClosingSoon ? (
+              <span className="text-[11px] px-2 py-1 rounded-full bg-orange-600 text-white shadow-sm">
+                即將截止
+              </span>
+            ) : null}
             {product.isHot ? (
               <span className="text-[11px] px-2 py-1 rounded-full bg-rose-600 text-white shadow-sm">
                 熱銷
@@ -316,6 +786,13 @@ function ProductCard({ product, rate }) {
         <h2 className="text-sm font-medium text-slate-900 line-clamp-2">
           {product.name}
         </h2>
+        {product.isPreorder && product.expectedArrival ? (
+          <p className="text-xs text-amber-700 line-clamp-2">
+            {product.expectedArrival}
+          </p>
+        ) : product.description ? (
+          <p className="text-xs text-slate-500 line-clamp-2">{product.description}</p>
+        ) : null}
         <div className="pt-1">
           {twd ? (
             <p className="text-sm text-slate-900">{twd}</p>
@@ -328,11 +805,28 @@ function ProductCard({ product, rate }) {
   );
 }
 
-function HomePage({ products, rate, loading, error }) {
+function parseSearchParams(searchString) {
+  if (!searchString || !searchString.startsWith("?")) return {};
+  try {
+    return Object.fromEntries(new URLSearchParams(searchString));
+  } catch {
+    return {};
+  }
+}
+
+function HomePage({ products, rate, loading, error, search: routeSearch }) {
   const CATEGORY_KEY = "maarushop_home_category_v1";
   const SEARCH_KEY = "maarushop_home_search_v1";
   const SORT_KEY = "maarushop_home_sort_v1";
+  const params = React.useMemo(() => parseSearchParams(routeSearch || ""), [routeSearch]);
+  const categoryFromUrl = params.category ?? null;
+  const subcategoryFromUrl = params.subcategory ?? null;
+  const searchFromUrl = params.q ?? null;
+  const sectionFromUrl = params.section ?? null;
+  const isPreorderSection = sectionFromUrl === "preorder";
+
   const [selectedCategory, setSelectedCategory] = React.useState(() => {
+    if (categoryFromUrl) return categoryFromUrl;
     try {
       return localStorage.getItem(CATEGORY_KEY) || "ALL";
     } catch {
@@ -341,12 +835,21 @@ function HomePage({ products, rate, loading, error }) {
   });
 
   const [search, setSearch] = React.useState(() => {
+    if (searchFromUrl !== null) return searchFromUrl;
     try {
       return localStorage.getItem(SEARCH_KEY) || "";
     } catch {
       return "";
     }
   });
+
+  // 當網址列上的 category / q 改變時，同步到 state
+  React.useEffect(() => {
+    if (categoryFromUrl !== null) setSelectedCategory(categoryFromUrl);
+  }, [categoryFromUrl]);
+  React.useEffect(() => {
+    if (searchFromUrl !== null) setSearch(searchFromUrl);
+  }, [searchFromUrl]);
 
   const [sortMode, setSortMode] = React.useState(() => {
     try {
@@ -398,9 +901,17 @@ function HomePage({ products, rate, loading, error }) {
 
   const filteredProducts = React.useMemo(() => {
     let result = products;
+    if (isPreorderSection) {
+      result = result.filter((p) => p.isPreorder);
+    }
     if (selectedCategory !== "ALL") {
       result = result.filter(
         (p) => (p?.category || "").trim() === selectedCategory
+      );
+    }
+    if (subcategoryFromUrl) {
+      result = result.filter(
+        (p) => (p?.subcategory || "").trim() === subcategoryFromUrl
       );
     }
     const q = search.trim().toLowerCase();
@@ -411,26 +922,52 @@ function HomePage({ products, rate, loading, error }) {
       const variant = (p?.variant || "").toLowerCase();
       return name.includes(q) || variant.includes(q);
     });
-  }, [products, selectedCategory, search]);
+  }, [products, selectedCategory, subcategoryFromUrl, search, isPreorderSection]);
 
   const uniqueProducts = React.useMemo(() => {
-    const base = getUniqueProductsByName(filteredProducts);
+    const base = getUniqueProductsByName(filteredProducts).map((p) =>
+      enrichProductCard(p, products)
+    );
     if (sortMode === "none") return base;
 
     const arr = base.slice();
     arr.sort((a, b) => {
-      const pa = toNumberOrNull(a?.price);
-      const pb = toNumberOrNull(b?.price);
+      const pa = toNumberOrNull(a?.minPrice ?? a?.price);
+      const pb = toNumberOrNull(b?.minPrice ?? b?.price);
       if (pa == null && pb == null) return 0;
       if (pa == null) return 1;
       if (pb == null) return -1;
       return sortMode === "price_asc" ? pa - pb : pb - pa;
     });
     return arr;
-  }, [filteredProducts, sortMode]);
+  }, [filteredProducts, products, sortMode]);
+
+  const preorderSpotlight = React.useMemo(() => {
+    if (isPreorderSection || loading || error) return [];
+    if (selectedCategory !== "ALL" || subcategoryFromUrl || search.trim()) return [];
+    const base = getUniqueProductsByName(products.filter((p) => p.isPreorder));
+    return base.map((p) => enrichProductCard(p, products));
+  }, [products, isPreorderSection, loading, error, selectedCategory, subcategoryFromUrl, search]);
+
+  const mainGridProducts = React.useMemo(() => {
+    if (isPreorderSection) return uniqueProducts;
+    if (preorderSpotlight.length > 0) {
+      return uniqueProducts.filter((p) => !p.isPreorder);
+    }
+    return uniqueProducts;
+  }, [uniqueProducts, isPreorderSection, preorderSpotlight.length]);
 
   return (
     <main className="max-w-6xl mx-auto px-4 py-8">
+      {isPreorderSection && !loading && !error ? (
+        <div className="mb-6">
+          <h1 className="text-lg font-semibold text-slate-900">預購開團中 ✨</h1>
+          <p className="text-sm text-slate-500 mt-1">
+            以下為預購商品，到貨時間依日本發售日為準，下單前請留意截單日期。
+          </p>
+        </div>
+      ) : null}
+
       {!loading && !error && (
         <div className="mb-6 space-y-3">
           {categories.length > 0 ? (
@@ -554,17 +1091,47 @@ function HomePage({ products, rate, loading, error }) {
         </div>
       )}
 
-      {!loading && !error && uniqueProducts.length === 0 && (
+      {!loading && !error && uniqueProducts.length === 0 && preorderSpotlight.length === 0 && (
         <p className="text-center text-sm text-slate-500">
-          目前沒有可顯示的商品。
+          {isPreorderSection ? "目前沒有預購中的商品。" : "目前沒有可顯示的商品。"}
         </p>
       )}
 
+      {!loading && !error && preorderSpotlight.length > 0 ? (
+        <section className="mb-10">
+          <div className="flex items-end justify-between mb-4 gap-3">
+            <div>
+              <h2 className="text-base font-semibold text-slate-900">預購開團中 ✨</h2>
+              <p className="text-xs text-slate-500 mt-0.5">日本新品預購，到貨時間依發售日為準</p>
+            </div>
+            <Link
+              to="/?section=preorder"
+              className="shrink-0 text-xs text-slate-600 hover:text-slate-900 underline underline-offset-2"
+            >
+              查看全部
+            </Link>
+          </div>
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-4 sm:gap-6">
+            {preorderSpotlight.slice(0, 4).map((p) => (
+              <ProductCard key={"preorder-" + (p.id || p.name)} product={p} rate={rate} />
+            ))}
+          </div>
+        </section>
+      ) : null}
+
+      {!loading && !error && !isPreorderSection && preorderSpotlight.length > 0 && mainGridProducts.length > 0 ? (
+        <div className="mb-4">
+          <h2 className="text-base font-semibold text-slate-900">所有商品</h2>
+        </div>
+      ) : null}
+
+      {mainGridProducts.length > 0 ? (
       <section className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-4 sm:gap-6">
-        {uniqueProducts.map((p) => (
+        {mainGridProducts.map((p) => (
           <ProductCard key={p.id || p.name} product={p} rate={rate} />
         ))}
       </section>
+      ) : null}
     </main>
   );
 }
@@ -609,6 +1176,11 @@ function ProductDetailPage({ products, rate, encodedName, onAddToCart }) {
   }, [group, selectedSku]);
 
   const displayImage = selectedItem?.image || mainProduct?.image || "";
+  const isPreorder = group.some((p) => p.isPreorder);
+  const canOrderSelected = selectedItem ? canPreorderOrder(selectedItem) : false;
+  const displayPreorder = selectedItem || mainProduct;
+  const deadlineText = formatDeadlineDisplay(displayPreorder?.deadlineAt);
+  const groupAllSoldOut = isPreorder && group.every((p) => !canPreorderOrder(p));
 
   return (
     <main className="max-w-4xl mx-auto px-4 py-8">
@@ -641,9 +1213,21 @@ function ProductDetailPage({ products, rate, encodedName, onAddToCart }) {
           </div>
 
           <div className="space-y-4">
-            <h1 className="text-lg font-semibold tracking-tight">
-              {mainProduct.name}
-            </h1>
+            <div className="flex flex-wrap items-center gap-2">
+              <h1 className="text-lg font-semibold tracking-tight">
+                {mainProduct.name}
+              </h1>
+              {isPreorder ? (
+                <span className="text-[11px] px-2 py-1 rounded-full bg-amber-500 text-white">
+                  預購
+                </span>
+              ) : null}
+              {groupAllSoldOut ? (
+                <span className="text-[11px] px-2 py-1 rounded-full bg-slate-500 text-white">
+                  完售
+                </span>
+              ) : null}
+            </div>
 
             {selectedItem?.price != null ? (
               <div className="space-y-0.5">
@@ -654,6 +1238,23 @@ function ProductDetailPage({ products, rate, encodedName, onAddToCart }) {
                 ) : (
                   <p className="text-base text-slate-500">價格請洽詢</p>
                 )}
+              </div>
+            ) : null}
+
+            {isPreorder ? (
+              <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4 space-y-2 text-sm text-amber-950">
+                <p className="font-medium">📦 預購說明</p>
+                {displayPreorder?.expectedArrival ? (
+                  <p>• 預計到貨：{displayPreorder.expectedArrival}</p>
+                ) : null}
+                {deadlineText ? (
+                  <p>• 截單日期：{deadlineText}</p>
+                ) : null}
+                <p>• 到貨後依訂單順序出貨</p>
+                {displayPreorder?.preorderNote ? (
+                  <p>• {displayPreorder.preorderNote}</p>
+                ) : null}
+                <p className="text-xs text-amber-800">※ 此為預購商品，非現貨。日期若有異動會於商品說明更新。</p>
               </div>
             ) : null}
 
@@ -684,11 +1285,13 @@ function ProductDetailPage({ products, rate, encodedName, onAddToCart }) {
                     {group.map((item, index) => {
                       const label =
                         item.variant || (group.length === 1 ? "單一規格" : `款式 ${index + 1}`);
+                      const itemSoldOut = item.isPreorder && !canPreorderOrder(item);
                       return (
                         <label
                           key={item.sku || item.id || index}
                           className={[
-                            "flex items-center justify-between gap-3 rounded-xl border px-3 py-2 cursor-pointer",
+                            "flex items-center justify-between gap-3 rounded-xl border px-3 py-2",
+                            itemSoldOut ? "opacity-50 cursor-not-allowed" : "cursor-pointer",
                             selectedSku === item.sku
                               ? "border-slate-900 bg-slate-50"
                               : "border-slate-200 bg-white hover:border-slate-900",
@@ -699,6 +1302,7 @@ function ProductDetailPage({ products, rate, encodedName, onAddToCart }) {
                               type="radio"
                               name="variant"
                               checked={selectedSku === item.sku}
+                              disabled={itemSoldOut}
                               onChange={() => setSelectedSku(item.sku)}
                             />
                             {item.image ? (
@@ -712,6 +1316,11 @@ function ProductDetailPage({ products, rate, encodedName, onAddToCart }) {
                               </span>
                             ) : null}
                             <span>{label}</span>
+                            {itemSoldOut ? (
+                              <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-200 text-slate-600">
+                                完售
+                              </span>
+                            ) : null}
                           </span>
                           <span className="text-xs text-slate-500">
                             {item.price != null ? formatTWDFromJPY(item.price, rate) || "" : ""}
@@ -726,10 +1335,14 @@ function ProductDetailPage({ products, rate, encodedName, onAddToCart }) {
               <button
                 type="button"
                 onClick={() => selectedItem && onAddToCart(selectedItem, 1)}
-                disabled={!selectedItem}
+                disabled={!selectedItem || !canOrderSelected}
                 className="w-full rounded-xl bg-slate-900 text-white text-sm py-3 hover:bg-slate-800 disabled:bg-slate-300 disabled:cursor-not-allowed"
               >
-                加入購物車
+                {!canOrderSelected
+                  ? "已完售"
+                  : isPreorder
+                  ? "加入預購"
+                  : "加入購物車"}
               </button>
             </div>
           </div>
@@ -780,6 +1393,11 @@ function CartDrawer({
 
   const totalTWD = formatTWDFromJPY(totalJPY, rate);
 
+  const hasPreorderItems = React.useMemo(
+    () => items.some((it) => it.isPreorder),
+    [items]
+  );
+
   function buildCheckoutText() {
     const lines = [];
     lines.push("MAARU 日本萌GO代購登記清單：");
@@ -793,12 +1411,16 @@ function CartDrawer({
       const qty = Number(it.qty || 0);
       const jpy = toNumberOrNull(it.price) || 0;
       const lineName = variant ? `${name} ${variant}` : name;
+      const preorderTag = it.isPreorder ? "（預購）" : "";
 
       if (r != null) {
         const twd = Math.round(jpy * r * qty);
-        lines.push(`${lineName} × ${qty}  NT$${twd.toLocaleString("zh-TW")}`);
+        lines.push(`${lineName}${preorderTag} × ${qty}  NT$${twd.toLocaleString("zh-TW")}`);
       } else {
-        lines.push(`${lineName} × ${qty}  NT$—`);
+        lines.push(`${lineName}${preorderTag} × ${qty}  NT$—`);
+      }
+      if (it.isPreorder && it.expectedArrival) {
+        lines.push(`  └ 預計到貨：${it.expectedArrival}`);
       }
     }
 
@@ -808,6 +1430,10 @@ function CartDrawer({
       lines.push(`商品總計：NT$${total.toLocaleString("zh-TW")}`);
     } else {
       lines.push(`商品總計：NT$—`);
+    }
+    if (hasPreorderItems) {
+      lines.push("");
+      lines.push("※ 清單含預購商品，到貨時間依各品項說明為準。");
     }
     lines.push("");
     lines.push("已複製完成，請直接回傳到官方LINE登記建立訂單");
@@ -890,6 +1516,11 @@ function CartDrawer({
           </div>
 
           <div className="flex-1 overflow-auto px-4 py-4 space-y-3">
+            {hasPreorderItems ? (
+              <div className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+                購物車含預購商品，到貨時間依各品項說明為準，非現貨立即寄出。
+              </div>
+            ) : null}
             {items.length === 0 ? (
               <p className="text-sm text-slate-500">購物車目前是空的。</p>
             ) : (
@@ -910,8 +1541,16 @@ function CartDrawer({
                   </div>
                   <div className="flex-1 min-w-0">
                     <p className="text-sm font-medium line-clamp-2">{it.name}</p>
+                    {it.isPreorder ? (
+                      <span className="inline-block mt-1 text-[10px] px-1.5 py-0.5 rounded bg-amber-100 text-amber-800">
+                        預購
+                      </span>
+                    ) : null}
                     {it.variant ? (
                       <p className="text-xs text-slate-500 mt-0.5">{it.variant}</p>
+                    ) : null}
+                    {it.isPreorder && it.expectedArrival ? (
+                      <p className="text-xs text-amber-700 mt-0.5">{it.expectedArrival}</p>
                     ) : null}
                     <div className="mt-2 flex items-center justify-between gap-2">
                       <div className="text-xs text-slate-600">
@@ -1053,6 +1692,7 @@ function App() {
   }, [cartItems]);
 
   function addToCart(product, qty) {
+    if (product.isPreorder && !canPreorderOrder(product)) return;
     const key = product.sku || [product.name, product.variant || "", product.price ?? ""].join("||");
     const addQty = Math.max(1, Number(qty || 1));
     setCartItems((prev) => {
@@ -1071,6 +1711,8 @@ function App() {
           price: product.price,
           image: product.image || "",
           qty: addQty,
+          isPreorder: !!product.isPreorder,
+          expectedArrival: product.expectedArrival || "",
         },
       ];
     });
@@ -1099,6 +1741,15 @@ function App() {
     setCartItems([]);
   }
 
+  const [menuOpen, setMenuOpen] = React.useState(false);
+  const [sidebarSearch, setSidebarSearch] = React.useState("");
+  const handleMenuNavigate = (path) => {
+    let full = path;
+    const q = sidebarSearch.trim();
+    if (q) full += (path.includes("?") ? "&" : "?") + "q=" + encodeURIComponent(q);
+    navigateTo(full);
+  };
+
   let page = null;
   if (route.name === "home") {
     page = (
@@ -1107,6 +1758,7 @@ function App() {
         rate={rate}
         loading={loading}
         error={error}
+        search={route.search}
       />
     );
   } else if (route.name === "product") {
@@ -1124,7 +1776,18 @@ function App() {
 
   return (
     <div className="flex flex-col min-h-screen">
-      <Navbar cartCount={cartCount} onOpenCart={() => setCartOpen(true)} />
+      <Navbar
+        cartCount={cartCount}
+        onOpenCart={() => setCartOpen(true)}
+        onOpenMenu={() => setMenuOpen(true)}
+      />
+      <CategorySidebar
+        open={menuOpen}
+        onClose={() => setMenuOpen(false)}
+        searchKeyword={sidebarSearch}
+        onSearchChange={setSidebarSearch}
+        onNavigate={handleMenuNavigate}
+      />
       {page}
       <CartDrawer
         open={cartOpen}
